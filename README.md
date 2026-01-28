@@ -1,6 +1,6 @@
 # EDF_viewer
 
-## Setupt Server
+## Setup Server
 ```
 python -m venv venv
 venv\Scripts\activate  # Windows
