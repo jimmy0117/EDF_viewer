@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-tw">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ edf_file.title }} - EDF 檢視平台</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow-x: hidden; }
+        .navbar { margin-bottom: 0; }
+        .main-container { display: flex; height: calc(100vh - 56px); }
+        .sidebar {
+            width: 260px;
+            background-color: #2c3e50;
+            color: white;
+            border-right: 1px solid #34495e;
+            overflow-y: auto;
+            padding: 15px;
+        }
+        .viewer-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background-color: #ecf0f1; }
+        .hypnogram-container { height: 120px; border-bottom: 2px solid #34495e; background-color: #fff; }
+        .signals-container { flex: 1; overflow-y: auto; background-color: #fff; padding: 10px; }
+        .signal-plot {
+            height: 150px;
+            border: 1px solid #bdc3c7;
+            margin-bottom: 10px;
+            position: relative;
+            background-color: #fff;
+            border-radius: 4px;
+        }
+        .signal-label {
+            position: absolute;
+            left: 10px;
+            top: 5px;
+            font-weight: bold;
+            font-size: 13px;
+            background-color: rgba(52, 152, 219, 0.9);
+            color: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            z-index: 10;
+        }
+        .controls {
+            height: 70px;
+            background-color: #34495e;
+            border-top: 2px solid #2c3e50;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+            padding: 0 20px;
+        }
+        .signal-list-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background-color: #3498db;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s;
+        }
+        .signal-list-item:hover { background-color: #2980b9; transform: translateX(5px); }
+        .signal-list-item.active { background-color: #2980b9; box-shadow: 0 0 10px rgba(52, 152, 219, 0.5); }
+        .signal-list-item.inactive { background-color: #7f8c8d; opacity: 0.6; }
+        .time-info { font-size: 16px; font-weight: bold; color: white; }
+        .btn-control {
+            padding: 8px 16px;
+            font-size: 14px;
+            border-radius: 5px;
+            border: none;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        .btn-control:hover { transform: scale(1.05); }
+        .btn-primary-control { background-color: #3498db; }
+        .btn-primary-control:hover { background-color: #2980b9; }
+        .btn-secondary-control { background-color: #95a5a6; }
+        .btn-secondary-control:hover { background-color: #7f8c8d; }
+        .sidebar h6 { color: #ecf0f1; border-bottom: 2px solid #3498db; padding-bottom: 8px; margin-bottom: 15px; }
+        
+        /* 隱藏 number input 的上下箭頭 */
+        input[type="number"]::-webkit-inner-spin-button,
+        input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        input[type="number"] {
+            -moz-appearance: textfield;
+        }
+        
+        /* 睡眠階段圖例樣式 */
+        .stage-legend {
+            margin-top: 15px;
+        }
+        .stage-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            padding: 5px;
+            border-radius: 3px;
+            transition: background-color 0.3s;
+        }
+        .stage-item:hover {
+            background-color: rgba(52, 152, 219, 0.2);
+        }
+        .stage-color {
+            width: 30px;
+            height: 20px;
+            border-radius: 3px;
+            margin-right: 10px;
+            border: 1px solid #555;
+        }
+        .stage-name {
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="{% url 'viewer:index' %}">EDF 檢視平台</a>
+        <div class="navbar-text text-white">
+            <strong>{{ edf_file.title }}</strong> | 時長: {{ edf_file.duration|floatformat:1 }}s
+        </div>
+    </div>
+</nav>
+
+<div class="main-container">
+    <div class="sidebar">
+        <h6>信號列表 ({{ signals.count }})</h6>
+        <div id="signal-list">
+            {% for signal in signals %}
+            <div class="signal-list-item active" data-signal-id="{{ signal.id }}" data-signal-label="{{ signal.signal_label }}">
+                <div><strong>{{ signal.signal_label }}</strong></div>
+                <small>{{ signal.units|default:"N/A" }} | {{ signal.sampling_rate|floatformat:0 }} Hz</small>
+            </div>
+            {% endfor %}
+        </div>
+        <hr style="border-color: #7f8c8d;">
+        <div>
+            <h6>檔案資訊</h6>
+            <small>
+                患者: {{ edf_file.patient_name|default:"未知" }}<br>
+                錄製: {{ edf_file.recording_date|date:"Y-m-d H:i"|default:"未知" }}<br>
+                信號數: {{ edf_file.num_signals }}
+            </small>
+        </div>
+        <hr style="border-color: #7f8c8d;">
+        <div class="stage-legend">
+            <h6>睡眠階段</h6>
+            <div class="stage-item">
+                <div class="stage-color" style="background-color: #FFD700;"></div>
+                <span class="stage-name">W - 清醒</span>
+            </div>
+            <div class="stage-item">
+                <div class="stage-color" style="background-color: #FF6347;"></div>
+                <span class="stage-name">REM - 快速動眼</span>
+            </div>
+            <div class="stage-item">
+                <div class="stage-color" style="background-color: #87CEEB;"></div>
+                <span class="stage-name">N1 - 淺睡</span>
+            </div>
+            <div class="stage-item">
+                <div class="stage-color" style="background-color: #4169E1;"></div>
+                <span class="stage-name">N2 - 睡眠</span>
+            </div>
+            <div class="stage-item">
+                <div class="stage-color" style="background-color: #00008B;"></div>
+                <span class="stage-name">N3 - 深睡</span>
+            </div>
+        </div>
+    </div>
+    
+    <div class="viewer-area" data-has-hypnogram="{{ edf_file.hypnogram_file|yesno:'1,0' }}">
+        <div class="hypnogram-container" id="hypnogram"></div>
+        <div class="signals-container" id="signals-container">
+            <div class="text-center text-muted py-5">
+                <div class="spinner-border" role="status"></div>
+                <p class="mt-3">載入信號數據中...</p>
+            </div>
+        </div>
+        <div class="controls">
+            <button class="btn-control btn-secondary-control" id="btn-start">⏮ 起始</button>
+            <button class="btn-control btn-primary-control" id="btn-prev">◀ 上頁</button>
+            <span class="time-info">
+                <input type="number" id="current-time" value="0.0" min="0" max="{{ edf_file.duration|floatformat:1 }}" step="1" style="width: 80px; text-align: center; border: 2px solid #3498db; border-radius: 4px; padding: 4px; background: #2c3e50; color: white; font-weight: bold;">s / <span id="total-time">{{ edf_file.duration|floatformat:1 }}</span>s
+            </span>
+            <button class="btn-control btn-primary-control" id="btn-next">下頁 ▶</button>
+            <button class="btn-control btn-secondary-control" id="btn-end">結束 ⏭</button>
+            <select class="form-select form-select-sm" id="window-size" style="width: 130px;">
+                <option value="10">10 秒</option>
+                <option value="30" selected>30 秒</option>
+                <option value="60">60 秒</option>
+                <option value="120">120 秒</option>
+            </select>
+            <button class="btn-control btn-primary-control" id="btn-refresh">🔄 重新載入</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const totalDuration = {{ edf_file.duration }};
+let currentTime = 0;
+let windowSize = 30;
+const signalCache = {};
+const inFlight = new Set();
+const activeSignals = new Set(); // ✅ 提前定義，避免 ReferenceError
+const hasHypnogram = document.querySelector('.viewer-area').dataset.hasHypnogram === '1';
+
+const STAGE_COLORS = {
+    'W': '#FFD700',     // Awake - 黃色
+    'N1': '#87CEEB',    // Light sleep - 淡藍
+    'N2': '#4169E1',    // Sleep - 藍色
+    'N3': '#00008B',    // Deep sleep - 深藍
+    'REM': '#FF6347',   // REM - 紅色
+    'unknown': '#CCC'
+};
+
+// 初始化活動信號
+document.querySelectorAll('.signal-list-item').forEach(item => {
+    activeSignals.add(parseInt(item.dataset.signalId));
+});
+
+// 信號列表點擊事件
+document.querySelectorAll('.signal-list-item').forEach(item => {
+    item.addEventListener('click', function() {
+        const signalId = parseInt(this.dataset.signalId);
+        
+        if (activeSignals.has(signalId)) {
+            activeSignals.delete(signalId);
+            this.classList.remove('active');
+            this.classList.add('inactive');
+        } else {
+            activeSignals.add(signalId);
+            this.classList.remove('inactive');
+            this.classList.add('active');
+        }
+        renderSignals();
+    });
+});
+
+// 載入所有信號數據
+async function loadAllSignals() {
+    const signals = [{% for signal in signals %}{{ signal.id }}{% if not forloop.last %},{% endif %}{% endfor %}];
+    
+    for (const signalId of signals) {
+        try {
+            const response = await fetch(`/signal/${signalId}/data/`);
+            const data = await response.json();
+            if (!data.error) {
+                signalData[signalId] = data;
+            }
+        } catch (error) {
+            console.error(`載入信號 ${signalId} 失敗:`, error);
+        }
+    }
+    
+    renderHypnogram();
+    renderSignals();
+}
+
+// 渲染 Hypnogram
+async function renderHypnogram() {
+    if (!hasHypnogram) {
+        Plotly.newPlot('hypnogram', [], { title: { text: 'Hypnogram (無資料)' }, height: 120 }, { displayModeBar: false });
+        return;
+    }
+
+    try {
+        const res = await fetch(`/edf/{{ edf_file.pk }}/hypnogram/`);
+        if (!res.ok) throw new Error(await res.text());
+        const json = await res.json();
+
+        if (json.error) {
+            Plotly.newPlot('hypnogram', [], { title: { text: `Hypnogram (讀取失敗: ${json.error})` }, height: 120 }, { displayModeBar: false });
+            return;
+        }
+
+        const annotations = json.data || [];
+        
+        // 產生色塊 (shapes) - 每個 annotation 一個色塊
+        const shapes = annotations.map(ann => ({
+            type: 'rect',
+            x0: ann.onset,
+            x1: ann.onset + ann.duration,
+            y0: -0.5,
+            y1: 0.5,
+            fillcolor: STAGE_COLORS[ann.stage] || STAGE_COLORS['unknown'],
+            opacity: 0.8,
+            line: { width: 1, color: '#333' },
+        }));
+
+        const layout = {
+            title: { text: 'Hypnogram', font: { size: 14 } },
+            xaxis: { 
+                range: [currentTime, Math.min(currentTime + windowSize, totalDuration)],  // 與信號同步
+                title: '時間 (秒)',
+                gridcolor: '#ecf0f1'
+            },
+            yaxis: { 
+                range: [-1, 1],
+                tickvals: [],
+                showticklabels: false,
+            },
+            height: 120,
+            margin: { l: 60, r: 30, t: 40, b: 40 },
+            shapes: shapes,
+            plot_bgcolor: '#fff',
+            paper_bgcolor: '#fff'
+        };
+
+        Plotly.newPlot('hypnogram', [], layout, { displayModeBar: false });
+
+    } catch (err) {
+        console.error('Hypnogram error:', err);
+        Plotly.newPlot('hypnogram', [], { title: { text: `Hypnogram (讀取失敗: ${err.message})` }, height: 120 }, { displayModeBar: false });
+    }
+}
+
+// 載入信號視窗數據
+async function loadSignalWindow(signalId) {
+    const windowKey = `${currentTime}-${windowSize}`;
+    const cache = signalCache[signalId];
+
+    if (cache && cache.windowKey === windowKey) return;
+    if (inFlight.has(`${signalId}-${windowKey}`)) return;
+
+    inFlight.add(`${signalId}-${windowKey}`);
+    try {
+        const res = await fetch(`/signal/${signalId}/data/?start=${currentTime}&end=${currentTime + windowSize}`);
+        const json = await res.json();
+        if (!json.error) {
+            signalCache[signalId] = { windowKey, ...json };
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        inFlight.delete(`${signalId}-${windowKey}`);
+        renderSignals();
+    }
+}
+
+// 渲染信號
+function renderSignals() {
+    const container = document.getElementById('signals-container');
+    container.innerHTML = '';
+
+    if (activeSignals.size === 0) {
+        container.innerHTML = '<div class="text-center text-muted py-5"><p>請從左側選擇要顯示的信號</p></div>';
+        return;
+    }
+
+    activeSignals.forEach(signalId => {
+        const plotDiv = document.createElement('div');
+        plotDiv.className = 'signal-plot';
+        plotDiv.id = `signal-plot-${signalId}`;
+        container.appendChild(plotDiv);
+
+        const cache = signalCache[signalId];
+        const windowKey = `${currentTime}-${windowSize}`;
+
+        if (!cache || cache.windowKey !== windowKey) {
+            plotDiv.innerHTML = '<div class="text-center text-muted py-4">載入中...</div>';
+            loadSignalWindow(signalId);
+            return;
+        }
+
+        const { data, sampling_rate, signal_label, units } = cache;
+        const timeArray = data.map((_, i) => currentTime + (i / (sampling_rate || 1)));
+
+        const trace = {
+            x: timeArray,
+            y: data,
+            type: 'scatter',
+            mode: 'lines',
+            line: { color: '#2980b9', width: 1.5 },
+            name: signal_label
+        };
+
+        const layout = {
+            xaxis: { range: [currentTime, Math.min(currentTime + windowSize, totalDuration)] },
+            yaxis: { title: { text: units || 'N/A', font: { size: 11 } } },
+            height: 150,
+            margin: { l: 60, r: 30, t: 10, b: 30 },
+            showlegend: false
+        };
+
+        Plotly.newPlot(plotDiv.id, [trace], layout, { displayModeBar: false, responsive: true });
+    });
+}
+
+// 控制按鈕
+document.getElementById('btn-start').addEventListener('click', () => {
+    currentTime = 0;
+    updateView();
+});
+
+document.getElementById('btn-prev').addEventListener('click', () => {
+    currentTime = Math.max(0, currentTime - windowSize);
+    updateView();
+});
+
+document.getElementById('btn-next').addEventListener('click', () => {
+    currentTime = Math.min(totalDuration - windowSize, currentTime + windowSize);
+    updateView();
+});
+
+document.getElementById('btn-end').addEventListener('click', () => {
+    currentTime = Math.max(0, totalDuration - windowSize);
+    updateView();
+});
+
+document.getElementById('window-size').addEventListener('change', (e) => {
+    windowSize = parseInt(e.target.value);
+    currentTime = Math.min(currentTime, totalDuration - windowSize);
+    updateView();
+});
+
+document.getElementById('btn-refresh').addEventListener('click', () => {
+    signalData = {};
+    loadAllSignals();
+});
+
+// 時間輸入框事件
+document.getElementById('current-time').addEventListener('change', (e) => {
+    const newTime = parseFloat(e.target.value);
+    if (!isNaN(newTime) && newTime >= 0 && newTime <= totalDuration) {
+        currentTime = Math.min(newTime, totalDuration - windowSize);
+        updateView();
+    } else {
+        e.target.value = currentTime.toFixed(1);
+    }
+});
+
+document.getElementById('current-time').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        e.target.blur(); // 觸發 change 事件
+    }
+});
+
+function updateView() {
+    document.getElementById('current-time').value = currentTime.toFixed(1);
+    renderHypnogram();
+    renderSignals();
+}
+
+document.addEventListener('DOMContentLoaded', updateView);
+</script>
+</body>
+</html>

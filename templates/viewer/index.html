@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-tw">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EDF 檢視平台</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+    <div class="container-fluid">
+        <a class="navbar-brand" href="{% url 'viewer:index' %}">EDF 檢視平台</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'viewer:upload_edf' %}">上傳檔案</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<div class="container mt-4">
+    <h1 class="mb-4">EDF 檔案列表</h1>
+    
+    {% if edf_files %}
+        <div class="row">
+            {% for edf_file in edf_files %}
+                <div class="col-md-6 mb-3">
+                    <div class="card">
+                        <div class="card-body">
+                            <h5 class="card-title">{{ edf_file.title }}</h5>
+                            <p class="card-text">
+                                <small class="text-muted">
+                                    患者：{{ edf_file.patient_name|default:"未知" }}<br>
+                                    上傳時間：{{ edf_file.uploaded_at|date:"Y-m-d H:i" }}<br>
+                                    信號數量：{{ edf_file.num_signals }}<br>
+                                    時長：{{ edf_file.duration|floatformat:2 }} 秒
+                                </small>
+                            </p>
+                            <a href="{% url 'viewer:view_edf' edf_file.pk %}" class="btn btn-primary btn-sm">檢視詳情</a>
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="alert alert-info">
+            還沒有上傳任何 EDF 檔案。<a href="{% url 'viewer:upload_edf' %}">立即上傳</a>
+        </div>
+    {% endif %}
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
