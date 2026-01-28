@@ -22,3 +22,5 @@ python manage.py migrate viewer
 python manage.py migrate
 python manage.py shell
 ```
+
+###### I'm gay
