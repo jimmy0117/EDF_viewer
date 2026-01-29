@@ -23,11 +23,33 @@
         .signals-container { flex: 1; overflow-y: auto; background-color: #fff; padding: 10px; }
         .signal-plot {
             height: 150px;
+            min-height: 80px;
             border: 1px solid #bdc3c7;
             margin-bottom: 10px;
             position: relative;
             background-color: #fff;
             border-radius: 4px;
+        }
+        .signal-title {
+            text-align: center;
+            font-weight: 700;
+            color: #2c3e50;
+            margin: 4px 0 2px;
+        }
+        /* 新增拖曳把手樣式 */
+        .resize-handle {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            /* right: 6px; -> 移到中央 */
+            left: 50%;
+            bottom: 6px;
+            transform: translateX(-50%);
+            cursor: ns-resize;
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            border-radius: 3px;
+            box-shadow: 0 0 4px rgba(0,0,0,0.2);
+            opacity: 0.85;
         }
         .signal-label {
             position: absolute;
@@ -207,7 +229,8 @@ let currentTime = 0;
 let windowSize = 30;
 const signalCache = {};
 const inFlight = new Set();
-const activeSignals = new Set(); // ✅ 提前定義，避免 ReferenceError
+const activeSignals = new Set();
+const signalHeights = {}; // 新增：記錄各信號圖高度
 const hasHypnogram = document.querySelector('.viewer-area').dataset.hasHypnogram === '1';
 
 const STAGE_COLORS = {
@@ -357,10 +380,20 @@ function renderSignals() {
         const plotDiv = document.createElement('div');
         plotDiv.className = 'signal-plot';
         plotDiv.id = `signal-plot-${signalId}`;
-        container.appendChild(plotDiv);
+        plotDiv.style.height = `${signalHeights[signalId] || 150}px`;
 
         const cache = signalCache[signalId];
         const windowKey = `${currentTime}-${windowSize}`;
+        const label = (cache && cache.signal_label) ||
+            document.querySelector(`[data-signal-id="${signalId}"]`)?.dataset.signalLabel ||
+            `Signal ${signalId}`;
+
+        const titleDiv = document.createElement('div');
+        titleDiv.className = 'signal-title';
+        titleDiv.textContent = label;
+
+        container.appendChild(titleDiv);
+        container.appendChild(plotDiv);
 
         if (!cache || cache.windowKey !== windowKey) {
             plotDiv.innerHTML = '<div class="text-center text-muted py-4">載入中...</div>';
@@ -370,6 +403,7 @@ function renderSignals() {
 
         const { data, sampling_rate, signal_label, units } = cache;
         const timeArray = data.map((_, i) => currentTime + (i / (sampling_rate || 1)));
+        const plotHeight = signalHeights[signalId] || 150;
 
         const trace = {
             x: timeArray,
@@ -383,12 +417,44 @@ function renderSignals() {
         const layout = {
             xaxis: { range: [currentTime, Math.min(currentTime + windowSize, totalDuration)] },
             yaxis: { title: { text: units || 'N/A', font: { size: 11 } } },
-            height: 150,
+            height: plotHeight,
             margin: { l: 60, r: 30, t: 10, b: 30 },
             showlegend: false
         };
 
         Plotly.newPlot(plotDiv.id, [trace], layout, { displayModeBar: false, responsive: true });
+
+        // 新增：拖曳把手
+        const handle = document.createElement('div');
+        handle.className = 'resize-handle';
+        plotDiv.appendChild(handle);
+        attachResizeHandle(handle, plotDiv, signalId);
+    });
+}
+
+// 新增：設定拖曳事件以調整高度
+function attachResizeHandle(handle, plotDiv, signalId) {
+    let startY = 0;
+    let startHeight = 0;
+
+    const onMouseMove = (e) => {
+        const newHeight = Math.max(80, startHeight + (e.clientY - startY));
+        signalHeights[signalId] = newHeight;
+        plotDiv.style.height = `${newHeight}px`;
+        Plotly.relayout(plotDiv.id, { height: newHeight });
+    };
+
+    const onMouseUp = () => {
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+    };
+
+    handle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        startY = e.clientY;
+        startHeight = plotDiv.offsetHeight;
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
     });
 }
 

@@ -20,5 +20,5 @@ rm db.sqlite3
 python manage.py makemigrations viewer
 python manage.py migrate viewer
 python manage.py migrate
-python manage.py shell
+# python manage.py shell
 ```
