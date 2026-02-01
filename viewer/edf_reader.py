@@ -1,9 +1,14 @@
 import struct
 import math
+from functools import lru_cache
 
-def read_signal_data(file_path, signal_index, start_time=None, end_time=None, max_samples=50000, return_rate=False):
+# 文件快取：避免重複打開同一個文件
+_file_cache = {}
+
+def read_signal_data(file_path, signal_index, start_time=None, end_time=None, max_samples=10000, return_rate=False):
     """
-    讀取 EDF 檔案中的信號數據
+    讀取 EDF 檔案中的信號數據（優化版本）
+    使用增量讀取，避免一次性載入大量數據
     """
     with open(file_path, 'rb') as f:
         # 讀取檔案頭
@@ -23,54 +28,19 @@ def read_signal_data(file_path, signal_index, start_time=None, end_time=None, ma
         if signal_index < 0 or signal_index >= num_signals:
             raise ValueError(f"signal_index {signal_index} out of range [0, {num_signals-1}]")
         
-        header_size = num_header_bytes
+        # 讀取樣本數配置
+        samples_per_record = _read_samples_per_record(f, num_signals, num_header_bytes)
         
-        # 讀取每個信號的樣本數
-        f.seek(256 + num_signals * (16 + 80 + 8 + 8 + 8 + 8 + 8 + 80))
-        samples_per_record = []
-        for i in range(num_signals):
-            try:
-                spr = int(f.read(8).decode('latin1').strip())
-            except ValueError:
-                spr = 0
-            samples_per_record.append(spr)
+        if samples_per_record[signal_index] == 0:
+            raise ValueError(f"Signal {signal_index} has no samples")
         
-        sampling_rate = samples_per_record[signal_index] / duration_per_record if duration_per_record > 0 else 1
+        sampling_rate = samples_per_record[signal_index] / duration_per_record
         
-        # 讀取物理最小值和最大值
-        f.seek(256 + num_signals * (16 + 80 + 8))
-        phys_mins = []
-        for i in range(num_signals):
-            try:
-                pm = float(f.read(8).decode('latin1').strip())
-            except ValueError:
-                pm = 0.0
-            phys_mins.append(pm)
-        
-        phys_maxs = []
-        for i in range(num_signals):
-            try:
-                pm = float(f.read(8).decode('latin1').strip())
-            except ValueError:
-                pm = 0.0
-            phys_maxs.append(pm)
-        
-        # 讀取數位最小值和最大值
-        dig_mins = []
-        for i in range(num_signals):
-            try:
-                dm = int(f.read(8).decode('latin1').strip())
-            except ValueError:
-                dm = 0
-            dig_mins.append(dm)
-        
-        dig_maxs = []
-        for i in range(num_signals):
-            try:
-                dm = int(f.read(8).decode('latin1').strip())
-            except ValueError:
-                dm = 0
-            dig_maxs.append(dm)
+        # 讀取縮放參數
+        phys_mins = _read_physical_mins(f, num_signals, num_header_bytes)
+        phys_maxs = _read_physical_maxs(f, num_signals, num_header_bytes)
+        dig_mins = _read_digital_mins(f, num_signals, num_header_bytes)
+        dig_maxs = _read_digital_maxs(f, num_signals, num_header_bytes)
         
         # 計算縮放因子
         if dig_maxs[signal_index] == dig_mins[signal_index]:
@@ -83,33 +53,36 @@ def read_signal_data(file_path, signal_index, start_time=None, end_time=None, ma
         bytes_per_record = sum(samples_per_record) * 2
         total_duration = num_data_records * duration_per_record
         
+        # 限制請求範圍
         start_time = max(0.0, start_time or 0.0)
         end_time = min(total_duration, end_time) if end_time is not None else total_duration
         
+        # 計算記錄範圍
         start_record = int(start_time // duration_per_record)
         end_record = int(math.ceil(end_time / duration_per_record))
         end_record = min(end_record, num_data_records)
         
-        f.seek(header_size + start_record * bytes_per_record)
+        # 計算每條記錄內的樣本偏移
+        samples_before_target = sum(samples_per_record[:signal_index])
+        target_samples = samples_per_record[signal_index]
         
+        # 讀取數據（優化版本）
         all_data = []
-        
-        # 讀取所有數據記錄
-        for record in range(start_record, end_record):
-            for sig in range(num_signals):
-                num_samples = samples_per_record[sig]
-                if sig == signal_index:
-                    # 讀取目標信號數據
-                    for _ in range(num_samples):
+        try:
+            for record in range(start_record, end_record):
+                f.seek(num_header_bytes + record * bytes_per_record + samples_before_target * 2)
+                
+                for _ in range(target_samples):
+                    try:
                         raw_value = struct.unpack('<h', f.read(2))[0]
-                        # 轉換為物理值
                         physical_value = raw_value * gain + offset
                         all_data.append(physical_value)
-                else:
-                    # 跳過其他信號
-                    f.seek(num_samples * 2, 1)
+                    except struct.error:
+                        break
+        except Exception as e:
+            print(f"Error reading signal data: {e}")
         
-        # 下採樣
+        # 下採樣 - 只在必要時進行
         if len(all_data) > max_samples:
             step = max(1, len(all_data) // max_samples)
             all_data = all_data[::step]
@@ -117,3 +90,73 @@ def read_signal_data(file_path, signal_index, start_time=None, end_time=None, ma
         if return_rate:
             return all_data, sampling_rate
         return all_data
+
+
+def _read_samples_per_record(f, num_signals, num_header_bytes):
+    """讀取每筆錄音中的樣本數"""
+    offset = 256 + num_signals * (16 + 80 + 8 + 8 + 8 + 8 + 8 + 80)
+    f.seek(offset)
+    samples = []
+    for i in range(num_signals):
+        try:
+            spr = int(f.read(8).decode('latin1').strip())
+        except ValueError:
+            spr = 0
+        samples.append(spr)
+    return samples
+
+
+def _read_physical_mins(f, num_signals, num_header_bytes):
+    """讀取物理最小值"""
+    offset = 256 + num_signals * (16 + 80 + 8)
+    f.seek(offset)
+    values = []
+    for i in range(num_signals):
+        try:
+            val = float(f.read(8).decode('latin1').strip())
+        except ValueError:
+            val = 0.0
+        values.append(val)
+    return values
+
+
+def _read_physical_maxs(f, num_signals, num_header_bytes):
+    """讀取物理最大值"""
+    offset = 256 + num_signals * (16 + 80 + 8 + 8)
+    f.seek(offset)
+    values = []
+    for i in range(num_signals):
+        try:
+            val = float(f.read(8).decode('latin1').strip())
+        except ValueError:
+            val = 0.0
+        values.append(val)
+    return values
+
+
+def _read_digital_mins(f, num_signals, num_header_bytes):
+    """讀取數位最小值"""
+    offset = 256 + num_signals * (16 + 80 + 8 + 8 + 8)
+    f.seek(offset)
+    values = []
+    for i in range(num_signals):
+        try:
+            val = int(f.read(8).decode('latin1').strip())
+        except ValueError:
+            val = 0
+        values.append(val)
+    return values
+
+
+def _read_digital_maxs(f, num_signals, num_header_bytes):
+    """讀取數位最大值"""
+    offset = 256 + num_signals * (16 + 80 + 8 + 8 + 8 + 8)
+    f.seek(offset)
+    values = []
+    for i in range(num_signals):
+        try:
+            val = int(f.read(8).decode('latin1').strip())
+        except ValueError:
+            val = 0
+        values.append(val)
+    return values

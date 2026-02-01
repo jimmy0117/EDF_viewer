@@ -1,10 +1,15 @@
 from django.shortcuts import render, get_object_or_404, redirect
 from django.views.decorators.http import require_http_methods
 from django.contrib import messages
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from .models import EDFFile, Signal
 from .forms import EDFUploadForm
 from .edf_parser import parse_edf_file
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 def index(request):
     """首頁 - 顯示已上傳的 EDF 檔案列表"""
@@ -23,11 +28,10 @@ def upload_edf(request):
         if form.is_valid():
             edf_file = form.save()
             
-            # 解析 EDF 檔案
             try:
                 parse_edf_file(edf_file)
                 messages.success(request, f'檔案 {edf_file.title} 上傳成功！')
-                return redirect('viewer:view_edf', pk=edf_file.pk)  # 加上 app_name
+                return redirect('viewer:view_edf', pk=edf_file.pk)
             except Exception as e:
                 edf_file.delete()
                 messages.error(request, f'解析檔案失敗：{str(e)}')
@@ -51,8 +55,7 @@ def view_edf(request, pk):
 
 
 def signal_data(request, signal_id):
-    """獲取信號數據（JSON 格式用於圖表）"""
-    from django.http import JsonResponse
+    """獲取信號數據（JSON 格式用於圖表）- 優化版本"""
     signal = get_object_or_404(Signal, id=signal_id)
 
     start = request.GET.get('start')
@@ -66,13 +69,21 @@ def signal_data(request, signal_id):
 
     try:
         from .edf_reader import read_signal_data
+        
+        # 根據時間範圍調整採樣限制
+        time_range = (end_time - start_time) if (start_time and end_time) else signal.edf_file.duration
+        # 大範圍降低採樣，小範圍提高精度
+        max_samples = max(5000, min(50000, int(time_range * 100)))
+        
         data, sampling_rate = read_signal_data(
             signal.edf_file.file.path,
             signal.signal_index,
             start_time=start_time,
             end_time=end_time,
+            max_samples=max_samples,
             return_rate=True
         )
+        
         return JsonResponse({
             'signal_label': signal.signal_label,
             'units': signal.units,
@@ -80,23 +91,21 @@ def signal_data(request, signal_id):
             'data': data,
         })
     except Exception as e:
+        logger.error(f"Error reading signal {signal_id}: {str(e)}")
         return JsonResponse({'error': str(e)}, status=400)
 
 
 def hypnogram_data(request, pk):
     """讀取睡眠週期 annotation（onset, duration, stage）"""
-    from django.http import JsonResponse
-    import mne
-    
     edf_file = get_object_or_404(EDFFile, pk=pk)
 
     if not edf_file.hypnogram_file:
         return JsonResponse({'error': 'no hypnogram file'}, status=404)
 
     try:
+        import mne
         annotations = mne.read_annotations(edf_file.hypnogram_file.path)
         
-        # 睡眠階段名稱映射
         stage_mapping = {
             'Sleep stage W': 'W',
             'Sleep stage 1': 'N1',
@@ -117,29 +126,20 @@ def hypnogram_data(request, pk):
         }
         
         hypnogram_data = []
-        unique_stages = set()
         
         for onset, duration, description in zip(annotations.onset, annotations.duration, annotations.description):
             stage = stage_mapping.get(description, description.split()[-1] if 'Sleep stage' in description else description)
-            unique_stages.add(description)
             hypnogram_data.append({
                 'onset': float(onset),
                 'duration': float(duration),
                 'stage': stage
             })
         
-        print(f"Unique stage descriptions found: {unique_stages}")
-        print(f"Sample mapped stages: {[s['stage'] for s in hypnogram_data[:10]]}")
-        
-        main_edf = edf_file
-        total_duration = main_edf.duration
-        
         return JsonResponse({
             'data': hypnogram_data,
-            'total_duration': float(total_duration),
+            'total_duration': float(edf_file.duration),
             'num_segments': len(hypnogram_data),
         })
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error reading hypnogram: {str(e)}")
         return JsonResponse({'error': f'{type(e).__name__}: {str(e)}'}, status=400)

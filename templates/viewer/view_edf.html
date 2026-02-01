@@ -208,8 +208,12 @@
             <button class="btn-control btn-secondary-control" id="btn-start">⏮ 起始</button>
             <button class="btn-control btn-primary-control" id="btn-prev">◀ 上頁</button>
             <span class="time-info">
-                <input type="number" id="current-time" value="0.0" min="0" max="{{ edf_file.duration|floatformat:1 }}" step="1" style="width: 80px; text-align: center; border: 2px solid #3498db; border-radius: 4px; padding: 4px; background: #2c3e50; color: white; font-weight: bold;">s / <span id="total-time">{{ edf_file.duration|floatformat:1 }}</span>s
+                開始: <input type="number" id="current-time" value="0.0" min="0" max="{{ edf_file.duration|floatformat:1 }}" step="1" style="width: 70px; text-align: center; border: 2px solid #3498db; border-radius: 4px; padding: 4px; background: #2c3e50; color: white; font-weight: bold;">s
             </span>
+            <span class="time-info">
+                結束: <input type="number" id="end-time" value="30.0" min="0" max="{{ edf_file.duration|floatformat:1 }}" step="1" style="width: 70px; text-align: center; border: 2px solid #3498db; border-radius: 4px; padding: 4px; background: #2c3e50; color: white; font-weight: bold;">s
+            </span>
+            <span class="time-info">/ <span id="total-time">{{ edf_file.duration|floatformat:1 }}</span>s</span>
             <button class="btn-control btn-primary-control" id="btn-next">下頁 ▶</button>
             <button class="btn-control btn-secondary-control" id="btn-end">結束 ⏭</button>
             <select class="form-select form-select-sm" id="window-size" style="width: 130px;">
@@ -230,15 +234,26 @@ let windowSize = 30;
 const signalCache = {};
 const inFlight = new Set();
 const activeSignals = new Set();
-const signalHeights = {}; // 新增：記錄各信號圖高度
+const signalHeights = {};
 const hasHypnogram = document.querySelector('.viewer-area').dataset.hasHypnogram === '1';
+const CHUNK_SIZE = 300; // 最大單次載入 300 秒的數據
+
+// 快速查詢信號元數據
+const signalMetadata = {};
+{% for signal in signals %}
+signalMetadata[{{ signal.id }}] = {
+    label: '{{ signal.signal_label }}',
+    units: '{{ signal.units }}',
+    sampling_rate: {{ signal.sampling_rate }}
+};
+{% endfor %}
 
 const STAGE_COLORS = {
-    'W': '#FFD700',     // Awake - 黃色
-    'N1': '#87CEEB',    // Light sleep - 淡藍
-    'N2': '#4169E1',    // Sleep - 藍色
-    'N3': '#00008B',    // Deep sleep - 深藍
-    'REM': '#FF6347',   // REM - 紅色
+    'W': '#FFD700',
+    'N1': '#87CEEB',
+    'N2': '#4169E1',
+    'N3': '#00008B',
+    'REM': '#FF6347',
     'unknown': '#CCC'
 };
 
@@ -343,7 +358,7 @@ async function renderHypnogram() {
     }
 }
 
-// 載入信號視窗數據
+// 載入信號視窗數據 - 改進版本，支援更大範圍
 async function loadSignalWindow(signalId) {
     const windowKey = `${currentTime}-${windowSize}`;
     const cache = signalCache[signalId];
@@ -352,11 +367,52 @@ async function loadSignalWindow(signalId) {
     if (inFlight.has(`${signalId}-${windowKey}`)) return;
 
     inFlight.add(`${signalId}-${windowKey}`);
+    
     try {
-        const res = await fetch(`/signal/${signalId}/data/?start=${currentTime}&end=${currentTime + windowSize}`);
-        const json = await res.json();
-        if (!json.error) {
-            signalCache[signalId] = { windowKey, ...json };
+        const endTime = currentTime + windowSize;
+        const metadata = signalMetadata[signalId];
+        
+        let allData = [];
+        
+        // 如果視窗很大，分批載入
+        if (windowSize > CHUNK_SIZE) {
+            const chunkCount = Math.ceil(windowSize / CHUNK_SIZE);
+            
+            for (let i = 0; i < chunkCount; i++) {
+                const chunkStart = currentTime + (i * CHUNK_SIZE);
+                const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, endTime);
+                
+                try {
+                    const res = await fetch(`/signal/${signalId}/data/?start=${chunkStart}&end=${chunkEnd}`);
+                    const json = await res.json();
+                    
+                    if (!json.error && json.data) {
+                        allData = allData.concat(json.data);
+                    }
+                } catch (e) {
+                    console.error(`載入信號 ${signalId} 分塊 ${i+1}/${chunkCount} 失敗:`, e);
+                }
+                
+                // 給瀏覽器一點時間處理
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+            
+            if (allData.length > 0) {
+                signalCache[signalId] = { 
+                    windowKey, 
+                    data: allData,
+                    sampling_rate: metadata.sampling_rate,
+                    signal_label: metadata.label,
+                    units: metadata.units
+                };
+            }
+        } else {
+            // 小範圍直接載入
+            const res = await fetch(`/signal/${signalId}/data/?start=${currentTime}&end=${endTime}`);
+            const json = await res.json();
+            if (!json.error) {
+                signalCache[signalId] = { windowKey, ...json };
+            }
         }
     } catch (e) {
         console.error(e);
@@ -490,11 +546,12 @@ document.getElementById('btn-refresh').addEventListener('click', () => {
     loadAllSignals();
 });
 
-// 時間輸入框事件
+// 時間輸入框事件 - 開始時間
 document.getElementById('current-time').addEventListener('change', (e) => {
     const newTime = parseFloat(e.target.value);
     if (!isNaN(newTime) && newTime >= 0 && newTime <= totalDuration) {
         currentTime = Math.min(newTime, totalDuration - windowSize);
+        updateTimeInputs();
         updateView();
     } else {
         e.target.value = currentTime.toFixed(1);
@@ -507,13 +564,47 @@ document.getElementById('current-time').addEventListener('keypress', (e) => {
     }
 });
 
-function updateView() {
+// 時間輸入框事件 - 結束時間
+document.getElementById('end-time').addEventListener('change', (e) => {
+    const endTime = parseFloat(e.target.value);
+    if (!isNaN(endTime) && endTime > currentTime && endTime <= totalDuration) {
+        windowSize = endTime - currentTime;
+        updateTimeInputs();
+        updateView();
+    } else {
+        e.target.value = (currentTime + windowSize).toFixed(1);
+    }
+});
+
+document.getElementById('end-time').addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+        e.target.blur();
+    }
+});
+
+// 更新時間輸入框顯示
+function updateTimeInputs() {
     document.getElementById('current-time').value = currentTime.toFixed(1);
+    document.getElementById('end-time').value = (currentTime + windowSize).toFixed(1);
+}
+
+function updateView() {
+    updateTimeInputs();
+    // 清除快取以強制重新載入大範圍數據
+    if (windowSize > CHUNK_SIZE) {
+        Object.keys(signalCache).forEach(key => {
+            const cache = signalCache[key];
+            if (cache) cache.windowKey = null; // 標記為過期
+        });
+    }
     renderHypnogram();
     renderSignals();
 }
 
-document.addEventListener('DOMContentLoaded', updateView);
+document.addEventListener('DOMContentLoaded', () => {
+    updateTimeInputs();
+    updateView();
+});
 </script>
 </body>
 </html>
